@@ -13,7 +13,7 @@
 #define MAX_DIRS 10
 #define MAX_PATH 255
 // SET TO 1 to get DEBUG msgs
-#define DEBUG 1
+#define DEBUG 0
 
 //Global Variables
 char* path;
@@ -36,7 +36,80 @@ void parse(char* parseme, const char* delim, char** output) {
     //for execpe
     output[i] = NULL;
 }
+int do_pipe(char *argv[]){
+    char *cmd_head[MAX_ARGS];
+    char *cmd_tail[MAX_ARGS];
+    char *envp[] = { 0 };
+    int status, j, i, delim;
+    int pid_head, pid_tail;
+    int fd[2];
 
+
+    i = 0;
+    while(argv[i]!=NULL){
+      if(strncmp(argv[i], "::", 2) == 0){
+        delim = i;
+      }
+      ++i;
+    }
+    if(delim < 0){
+      uvsh_error("do-out missing '::'. Usage: do-out <command> :: <command>");
+      return;
+    }
+    if(argv[delim+1]==NULL){
+      uvsh_error("do-out missing command 2. Usage: do-out <command> :: <command>");
+      return;
+    }
+    if(strncmp(argv[1], "::", 2)==0){
+      uvsh_error("do-out missing first command. Usage: do-out <command> :: <destination>");
+      return;
+    }
+    // build cmd_head and cmd_tail
+    j=0;
+    for(i = 1; i < delim; ++i){
+      cmd_head[j]=argv[i];
+      j++;
+    }
+    cmd_head[j] = NULL;
+    j=0;
+    for(i = delim+1; argv[i]!=NULL;++i){
+      cmd_tail[j]=argv[i];
+      j++;
+    }
+    cmd_tail[j] = NULL;
+
+    char fulltail[INPUT_BUFFER]; 
+    strcat(fulltail, "/usr/");
+    strcat(fulltail, path);
+    strcat(fulltail, cmd_tail[0]);
+    cmd_tail[0] = fulltail;
+
+    char fullhead[INPUT_BUFFER];    
+    strcat(fullhead, path);
+    strcat(fullhead, cmd_head[0]);
+    cmd_head[0] = fullhead;
+
+    // plumbing!
+    pipe(fd);
+
+    if ((pid_head = fork()) == 0) {
+      dup2(fd[1], 1);
+      close(fd[0]);
+      execve(cmd_head[0], cmd_head, envp);
+    }
+    if ((pid_tail = fork()) == 0) {
+      dup2(fd[0], 0);
+      close(fd[1]);
+      execve(cmd_tail[0], cmd_tail, envp);
+    }
+
+    close(fd[0]);
+    close(fd[1]);
+
+    waitpid(pid_head, &status, 0);
+    waitpid(pid_tail, &status, 0); 
+
+}
 int do_out(char *argv[]){
   pid_t  pid;
   int delim = -1;
@@ -45,9 +118,6 @@ int do_out(char *argv[]){
   char *envp[] = { 0 };
   int fd;
   char *args[MAX_ARGS];
-
-
-
   if ((pid = fork()) == 0) {
         //check for delineator
     while(argv[i]!=NULL){
@@ -74,35 +144,22 @@ int do_out(char *argv[]){
       args[j] = argv[i];
       j++;
     }
-    // open output file
-    printf("child starting\n");
-    if(DEBUG == 1){
-      printf("attempting to open argv[i+1]: %s\n", argv[delim+1]);  
-    }
     fd = open(argv[i+1], O_CREAT|O_RDWR, S_IRUSR|S_IWUSR);
     if (fd == -1) {
         fprintf(stderr, "cannot open %s for writing\n", argv[delim+1]);
         exit(1);
-    }else{
-      fprintf(stdout, "opened %s for do_out\n", argv[delim+1]);
     }
-
-    // complete path for execve
     char fullpath[INPUT_BUFFER]; 
-    //Full path to my executable
     strcat(fullpath, path);
     strcat(fullpath, args[0]);
     args[0] = fullpath;
 
-
     dup2(fd, 1);
     dup2(fd, 2); 
     execve(args[0], args, envp);
-    printf("child is in a bad place\n");
+    uvsh_error("child is in a bad place");
   }
   waitpid(pid, &status, 0);
-  if(DEBUG == 1)
-    printf("pid = %d finished with exit code = %d\n", pid, status >> 8);
   return 0;
 }
 
@@ -146,22 +203,14 @@ int  execute_cmd(char *argv[])
         //then you need to perform an exit()
         //note, you have to bitshift the returned result by 8 
         //(see below)
-      }
-
-          /*
-           * No matter what nothing in this section will run because
-           *    a) the execve replaces the original child and exists
-           *    b) the child exits in the error loop with a return code of 
-           *       signed 1
-           */
-          
-      }
-      else { 
-          //The parent will wait for the child (exec) to finish
-          waitpid(pid, &status, 0);
-  	   if(DEBUG == 1)
-  		  printf("pid = %d finished with exit code = %d\n", pid, status >> 8);
-      }
+      }       
+    }
+    else { 
+        //The parent will wait for the child (exec) to finish
+        waitpid(pid, &status, 0);
+	   if(DEBUG == 1)
+		  printf("pid = %d finished with exit code = %d\n", pid, status >> 8);
+    }
 
     return 0;
 }
@@ -177,15 +226,12 @@ int main( int argc, char *argv[] )
     FILE* fp = NULL;
     if(!(fp = fopen(".uvshrc", "r"))){
       uvsh_error(".uvshrc not found");
-      printf("Exiting, did not find .uvshrc");
       exit(1);
     }
     //255 max address length
     char line[255];
     if(fgets(line, sizeof(line),fp)){
       path = line;
-      if(DEBUG==1)
-        printf("Path retrieved from .uvshrc : %s\n", path);
     }else{
       path = "/bin/";
     }
@@ -196,7 +242,7 @@ int main( int argc, char *argv[] )
     //----------
     for(;;) {                     
           // Make sure the output buffer is clear first 
-		  fflush(stdout);
+		      fflush(stdout);
           
           // Display prompt
           printf("$ ");  
@@ -209,22 +255,21 @@ int main( int argc, char *argv[] )
           parse(raw_input, " ", exec_argv);       
          
           //Do we need to exit?
-          //Technically, you don't need to do this as exit
-          //is a executable, but I like to do it as a sanity measure
           if (strncmp(exec_argv[0], "exit", 4) == 0)  
                 break;
 
           // Check if this is a do-out , pipe, or regular
-          if(strncmp(exec_argv[0], "do-out", 6) == 0)
+          if(strncmp(exec_argv[0], "do-out", 6) == 0){
             result = do_out(exec_argv);
-          else
+          }else if(strncmp(exec_argv[0], "do-pipe", 7) == 0){
+            result = do_pipe(exec_argv);
+          }else{       
             result = execute_cmd(exec_argv);
-
+          }
           //something bad happened so exit the loop
           if (result < 0) 
               break;
      }
-
      return 0;
 }
 
